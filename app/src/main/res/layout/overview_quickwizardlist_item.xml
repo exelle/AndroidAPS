@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<android.support.v7.widget.CardView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.cardview.widget.CardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:card_view="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/overview_quickwizard_cardview"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -24,10 +23,10 @@
             <ImageView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                card_view:srcCompat="@drawable/bread"
-                android:scaleType="fitStart"
+                android:adjustViewBounds="false"
                 android:cropToPadding="false"
-                android:adjustViewBounds="false" />
+                android:scaleType="fitStart"
+                card_view:srcCompat="@drawable/icon_quickwizard" />
 
             <LinearLayout
                 android:orientation="vertical"
@@ -131,4 +130,4 @@
 
     </LinearLayout>
 
-</android.support.v7.widget.CardView>
+</androidx.cardview.widget.CardView>

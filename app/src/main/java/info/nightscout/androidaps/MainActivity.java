@@ -1,119 +1,282 @@
 package info.nightscout.androidaps;
 
-import android.Manifest;
-import android.content.DialogInterface;
+import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.os.Build;
+import android.graphics.Rect;
 import android.os.Bundle;
-import android.preference.PreferenceManager;
-import android.support.v4.app.ActivityCompat;
-import android.support.v4.app.Fragment;
-import android.support.v4.content.ContextCompat;
-import android.support.v4.view.ViewPager;
-import android.support.v7.app.AlertDialog;
-import android.support.v7.app.AppCompatActivity;
-import android.support.v7.widget.Toolbar;
+import android.os.PersistableBundle;
+import android.text.SpannableString;
+import android.text.method.LinkMovementMethod;
+import android.text.util.Linkify;
+import android.util.TypedValue;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.ActionBarDrawerToggle;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.widget.Toolbar;
+import androidx.core.app.ActivityCompat;
+import androidx.drawerlayout.widget.DrawerLayout;
+import androidx.viewpager.widget.ViewPager;
+
+import com.google.android.material.navigation.NavigationView;
+import com.google.android.material.tabs.TabLayout;
 import com.joanzapata.iconify.Iconify;
 import com.joanzapata.iconify.fonts.FontAwesomeModule;
-import com.squareup.otto.Subscribe;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import info.nightscout.androidaps.activities.HistoryBrowseActivity;
+import info.nightscout.androidaps.activities.NoSplashAppCompatActivity;
+import info.nightscout.androidaps.activities.PreferencesActivity;
+import info.nightscout.androidaps.activities.SingleFragmentActivity;
+import info.nightscout.androidaps.activities.StatsActivity;
 import info.nightscout.androidaps.events.EventAppExit;
 import info.nightscout.androidaps.events.EventPreferenceChange;
-import info.nightscout.androidaps.events.EventRefreshGui;
+import info.nightscout.androidaps.events.EventRebuildTabs;
 import info.nightscout.androidaps.interfaces.PluginBase;
-import info.nightscout.androidaps.plugins.DanaR.Services.ExecutionService;
-import info.nightscout.androidaps.receivers.KeepAliveReceiver;
-import info.nightscout.androidaps.tabs.SlidingTabLayout;
+import info.nightscout.androidaps.interfaces.PluginType;
+import info.nightscout.androidaps.logging.L;
+import info.nightscout.androidaps.plugins.aps.loop.LoopPlugin;
+import info.nightscout.androidaps.plugins.bus.RxBus;
+import info.nightscout.androidaps.plugins.constraints.versionChecker.VersionCheckerUtilsKt;
+import info.nightscout.androidaps.plugins.general.nsclient.data.NSSettingsStatus;
+import info.nightscout.androidaps.setupwizard.SetupWizardActivity;
 import info.nightscout.androidaps.tabs.TabPageAdapter;
-import info.nightscout.utils.ImportExportPrefs;
-import info.nightscout.utils.LocaleHelper;
+import info.nightscout.androidaps.utils.AndroidPermission;
+import info.nightscout.androidaps.utils.FabricPrivacy;
+import info.nightscout.androidaps.utils.LocaleHelper;
+import info.nightscout.androidaps.utils.OKDialog;
+import info.nightscout.androidaps.utils.PasswordProtection;
+import info.nightscout.androidaps.utils.SP;
+import io.reactivex.android.schedulers.AndroidSchedulers;
+import io.reactivex.disposables.CompositeDisposable;
 
-public class MainActivity extends AppCompatActivity {
-    private static Logger log = LoggerFactory.getLogger(MainActivity.class);
+import static info.nightscout.androidaps.utils.EspressoTestHelperKt.isRunningRealPumpTest;
 
-    private static KeepAliveReceiver keepAliveReceiver;
+public class MainActivity extends NoSplashAppCompatActivity {
+    private static Logger log = LoggerFactory.getLogger(L.CORE);
+    private CompositeDisposable disposable = new CompositeDisposable();
 
-    static final int CASE_STORAGE = 0x1;
-    static final int CASE_SMS = 0x2;
+    private ActionBarDrawerToggle actionBarDrawerToggle;
 
-    private boolean askForSMS = false;
+    private MenuItem pluginPreferencesMenuItem;
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
         Iconify.with(new FontAwesomeModule());
-        LocaleHelper.onCreate(this, "en");
+        LocaleHelper.INSTANCE.update(getApplicationContext());
+
         setContentView(R.layout.activity_main);
-        checkEula();
-        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.LOLLIPOP_MR1) {
-            askForPermission(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE}, CASE_STORAGE);
-        }
-        if (Config.logFunctionCalls)
-            log.debug("onCreate");
+        setSupportActionBar(findViewById(R.id.toolbar));
+        getSupportActionBar().setDisplayShowTitleEnabled(false);
+        getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+        getSupportActionBar().setHomeButtonEnabled(true);
 
-        // show version in toolbar
-        try {
-            setTitle(getString(R.string.app_name) + " " + getPackageManager().getPackageInfo(getPackageName(), 0).versionName);
-        } catch (PackageManager.NameNotFoundException e) {
-            e.printStackTrace();
-        }
-        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
-        setSupportActionBar(toolbar);
-        registerBus();
+        DrawerLayout drawerLayout = findViewById(R.id.drawer_layout);
+        actionBarDrawerToggle = new ActionBarDrawerToggle(this, drawerLayout, R.string.open_navigation, R.string.close_navigation);
+        drawerLayout.addDrawerListener(actionBarDrawerToggle);
+        actionBarDrawerToggle.syncState();
 
-        try {
-            getSupportActionBar().setDisplayShowHomeEnabled(true);
-            getSupportActionBar().setIcon(R.mipmap.ic_launcher);
-        } catch (NullPointerException e) {
-            // no action
+        // initialize screen wake lock
+        processPreferenceChange(new EventPreferenceChange(R.string.key_keep_screen_on));
+
+        final ViewPager viewPager = findViewById(R.id.pager);
+        viewPager.addOnPageChangeListener(new ViewPager.OnPageChangeListener() {
+            @Override
+            public void onPageScrolled(int position, float positionOffset, int positionOffsetPixels) {
+            }
+
+            @Override
+            public void onPageSelected(int position) {
+                checkPluginPreferences(viewPager);
+            }
+
+            @Override
+            public void onPageScrollStateChanged(int state) {
+            }
+        });
+
+        //Check here if loop plugin is disabled. Else check via constraints
+        if (!LoopPlugin.getPlugin().isEnabled(PluginType.LOOP))
+            VersionCheckerUtilsKt.triggerCheckVersion();
+
+        FabricPrivacy.setUserStats();
+
+        setupTabs();
+        setupViews();
+
+        disposable.add(RxBus.INSTANCE
+                .toObservable(EventRebuildTabs.class)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(event -> {
+                    LocaleHelper.INSTANCE.update(getApplicationContext());
+                    if (event.getRecreate()) {
+                        recreate();
+                    } else {
+                        setupTabs();
+                        setupViews();
+                    }
+                    setWakeLock();
+                }, FabricPrivacy::logException)
+        );
+        disposable.add(RxBus.INSTANCE
+                .toObservable(EventPreferenceChange.class)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(this::processPreferenceChange, FabricPrivacy::logException)
+        );
+
+        if (!SP.getBoolean(R.string.key_setupwizard_processed, false) && !isRunningRealPumpTest()) {
+            Intent intent = new Intent(this, SetupWizardActivity.class);
+            startActivity(intent);
         }
 
-        if (keepAliveReceiver == null) {
-            keepAliveReceiver = new KeepAliveReceiver();
-            startService(new Intent(this, ExecutionService.class));
-            keepAliveReceiver.setAlarm(this);
+        AndroidPermission.notifyForStoragePermission(this);
+        AndroidPermission.notifyForBatteryOptimizationPermission(this);
+        if (Config.PUMPDRIVERS) {
+            AndroidPermission.notifyForLocationPermissions(this);
+            AndroidPermission.notifyForSMSPermissions(this);
+            AndroidPermission.notifyForSystemWindowPermissions(this);
         }
-        setUpTabs(false);
     }
 
-    @Subscribe
-    public void onStatusEvent(final EventRefreshGui ev) {
-        SharedPreferences SP = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
-        String lang = SP.getString("language", "en");
-        LocaleHelper.setLocale(getApplicationContext(), lang);
-        recreate();
-        try { // activity may be destroyed
-            setUpTabs(ev.isSwitchToLast());
-        } catch (IllegalStateException e) {
-            e.printStackTrace();
-        }
+    private void checkPluginPreferences(ViewPager viewPager) {
+        if (pluginPreferencesMenuItem == null) return;
+        if (((TabPageAdapter) viewPager.getAdapter()).getPluginAt(viewPager.getCurrentItem()).getPreferencesId() != -1)
+            pluginPreferencesMenuItem.setEnabled(true);
+        else pluginPreferencesMenuItem.setEnabled(false);
     }
 
-    private void setUpTabs(boolean switchToLast) {
+    @Override
+    public void onPostCreate(@Nullable Bundle savedInstanceState, @Nullable PersistableBundle persistentState) {
+        super.onPostCreate(savedInstanceState, persistentState);
+        actionBarDrawerToggle.syncState();
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        disposable.clear();
+    }
+
+    private void setWakeLock() {
+        boolean keepScreenOn = SP.getBoolean(R.string.key_keep_screen_on, false);
+        if (keepScreenOn)
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    public void processPreferenceChange(final EventPreferenceChange ev) {
+        if (ev.isChanged(R.string.key_keep_screen_on))
+            setWakeLock();
+    }
+
+    private void setupViews() {
         TabPageAdapter pageAdapter = new TabPageAdapter(getSupportFragmentManager(), this);
+        NavigationView navigationView = findViewById(R.id.navigation_view);
+        navigationView.setNavigationItemSelectedListener(menuItem -> true);
+        Menu menu = navigationView.getMenu();
+        menu.clear();
         for (PluginBase p : MainApp.getPluginsList()) {
             pageAdapter.registerNewFragment(p);
+            if (p.hasFragment() && !p.isFragmentVisible() && p.isEnabled(p.pluginDescription.getType()) && !p.pluginDescription.neverVisible) {
+                MenuItem menuItem = menu.add(p.getName());
+                menuItem.setCheckable(true);
+                menuItem.setOnMenuItemClickListener(item -> {
+                    Intent intent = new Intent(this, SingleFragmentActivity.class);
+                    intent.putExtra("plugin", MainApp.getPluginsList().indexOf(p));
+                    startActivity(intent);
+                    ((DrawerLayout) findViewById(R.id.drawer_layout)).closeDrawers();
+                    return true;
+                });
+            }
         }
-        ViewPager mPager = (ViewPager) findViewById(R.id.pager);
+        ViewPager mPager = findViewById(R.id.pager);
         mPager.setAdapter(pageAdapter);
-        SlidingTabLayout mTabs = (SlidingTabLayout) findViewById(R.id.tabs);
-        mTabs.setViewPager(mPager);
-        if (switchToLast)
-            mPager.setCurrentItem(pageAdapter.getCount() - 1, false);
+        //if (switchToLast)
+        //    mPager.setCurrentItem(pageAdapter.getCount() - 1, false);
+        checkPluginPreferences(mPager);
+    }
+
+    private void setupTabs() {
+        ViewPager viewPager = findViewById(R.id.pager);
+        TabLayout normalTabs = findViewById(R.id.tabs_normal);
+        normalTabs.setupWithViewPager(viewPager, true);
+        TabLayout compactTabs = findViewById(R.id.tabs_compact);
+        compactTabs.setupWithViewPager(viewPager, true);
+        Toolbar toolbar = findViewById(R.id.toolbar);
+        if (SP.getBoolean("short_tabtitles", false)) {
+            normalTabs.setVisibility(View.GONE);
+            compactTabs.setVisibility(View.VISIBLE);
+            toolbar.setLayoutParams(new LinearLayout.LayoutParams(Toolbar.LayoutParams.MATCH_PARENT, (int) getResources().getDimension(R.dimen.compact_height)));
+        } else {
+            normalTabs.setVisibility(View.VISIBLE);
+            compactTabs.setVisibility(View.GONE);
+            TypedValue typedValue = new TypedValue();
+            if (getTheme().resolveAttribute(R.attr.actionBarSize, typedValue, true)) {
+                toolbar.setLayoutParams(new LinearLayout.LayoutParams(Toolbar.LayoutParams.MATCH_PARENT,
+                        TypedValue.complexToDimensionPixelSize(typedValue.data, getResources().getDisplayMetrics())));
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (permissions.length != 0) {
+            if (ActivityCompat.checkSelfPermission(this, permissions[0]) == PackageManager.PERMISSION_GRANTED) {
+                switch (requestCode) {
+                    case AndroidPermission.CASE_STORAGE:
+                        //show dialog after permission is granted
+                        OKDialog.show(this, "", MainApp.gs(R.string.alert_dialog_storage_permission_text));
+                        break;
+                    case AndroidPermission.CASE_LOCATION:
+                    case AndroidPermission.CASE_SMS:
+                    case AndroidPermission.CASE_BATTERY:
+                    case AndroidPermission.CASE_PHONE_STATE:
+                    case AndroidPermission.CASE_SYSTEM_WINDOW:
+                        break;
+                }
+            }
+        }
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event.getAction() == MotionEvent.ACTION_DOWN) {
+            View v = getCurrentFocus();
+            if (v instanceof EditText) {
+                Rect outRect = new Rect();
+                v.getGlobalVisibleRect(outRect);
+                if (!outRect.contains((int) event.getRawX(), (int) event.getRawY())) {
+                    v.clearFocus();
+                    InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                    imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+                }
+            }
+        }
+        return super.dispatchTouchEvent(event);
     }
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         getMenuInflater().inflate(R.menu.menu_main, menu);
+        pluginPreferencesMenuItem = menu.findItem(R.id.nav_plugin_preferences);
+        checkPluginPreferences(findViewById(R.id.pager));
         return true;
     }
 
@@ -122,142 +285,61 @@ public class MainActivity extends AppCompatActivity {
         int id = item.getItemId();
         switch (id) {
             case R.id.nav_preferences:
-                Intent i = new Intent(getApplicationContext(), PreferencesActivity.class);
-                startActivity(i);
-                break;
-            case R.id.nav_resetdb:
-                new AlertDialog.Builder(this)
-                        .setTitle(R.string.nav_resetdb)
-                        .setMessage(R.string.reset_db_confirm)
-                        .setNegativeButton(android.R.string.cancel, null)
-                        .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
-                            @Override public void onClick(DialogInterface dialog, int which) {
-                                MainApp.getDbHelper().resetDatabases();
-                            }
-                        })
-                        .create()
-                        .show();
-                break;
-            case R.id.nav_export:
-                ImportExportPrefs.verifyStoragePermissions(this);
-                ImportExportPrefs.exportSharedPreferences(this);
-                break;
-            case R.id.nav_import:
-                ImportExportPrefs.verifyStoragePermissions(this);
-                ImportExportPrefs.importSharedPreferences(this);
-                break;
-//            case R.id.nav_test_alarm:
-//                final int REQUEST_CODE_ASK_PERMISSIONS = 2355;
-//                int permission = ActivityCompat.checkSelfPermission(this, Manifest.permission.SYSTEM_ALERT_WINDOW);
-//                if (permission != PackageManager.PERMISSION_GRANTED) {
-//                    // We don't have permission so prompt the user
-//                    // On Android 6 give permission for alarming in Settings -> Apps -> Draw over other apps
-//                    ActivityCompat.requestPermissions(
-//                            this,
-//                            new String[]{Manifest.permission.SYSTEM_ALERT_WINDOW},
-//                            REQUEST_CODE_ASK_PERMISSIONS
-//                    );
-//                }
-//                Intent alertServiceIntent = new Intent(getApplicationContext(), AlertService.class);
-//                alertServiceIntent.putExtra("alertText", getString(R.string.nav_test_alert));
-//                getApplicationContext().startService(alertServiceIntent);
-//                break;
+                PasswordProtection.QueryPassword(this, R.string.settings_password, "settings_password", () -> {
+                    Intent i = new Intent(this, PreferencesActivity.class);
+                    i.putExtra("id", -1);
+                    startActivity(i);
+                }, null);
+                return true;
+            case R.id.nav_historybrowser:
+                startActivity(new Intent(this, HistoryBrowseActivity.class));
+                return true;
+            case R.id.nav_setupwizard:
+                startActivity(new Intent(this, SetupWizardActivity.class));
+                return true;
+            case R.id.nav_about:
+                AlertDialog.Builder builder = new AlertDialog.Builder(this);
+                builder.setTitle(MainApp.gs(R.string.app_name) + " " + BuildConfig.VERSION);
+                builder.setIcon(MainApp.getIcon());
+                String message = "Build: " + BuildConfig.BUILDVERSION + "\n";
+                message += "Flavor: " + BuildConfig.FLAVOR + BuildConfig.BUILD_TYPE + "\n";
+                message += MainApp.gs(R.string.configbuilder_nightscoutversion_label) + " " + NSSettingsStatus.getInstance().nightscoutVersionName;
+                if (MainApp.engineeringMode)
+                    message += "\n" + MainApp.gs(R.string.engineering_mode_enabled);
+                message += MainApp.gs(R.string.about_link_urls);
+                final SpannableString messageSpanned = new SpannableString(message);
+                Linkify.addLinks(messageSpanned, Linkify.WEB_URLS);
+                builder.setMessage(messageSpanned);
+                builder.setPositiveButton(MainApp.gs(R.string.ok), null);
+                AlertDialog alertDialog = builder.create();
+                alertDialog.show();
+                ((TextView) alertDialog.findViewById(android.R.id.message)).setMovementMethod(LinkMovementMethod.getInstance());
+                return true;
             case R.id.nav_exit:
                 log.debug("Exiting");
-                keepAliveReceiver.cancelAlarm(this);
-
-                MainApp.bus().post(new EventAppExit());
-                MainApp.closeDbHelper();
+                RxBus.INSTANCE.send(new EventAppExit());
                 finish();
                 System.runFinalization();
                 System.exit(0);
-                break;
+                return true;
+            case R.id.nav_plugin_preferences:
+                ViewPager viewPager = findViewById(R.id.pager);
+                final PluginBase plugin = ((TabPageAdapter) viewPager.getAdapter()).getPluginAt(viewPager.getCurrentItem());
+                PasswordProtection.QueryPassword(this, R.string.settings_password, "settings_password", () -> {
+                    Intent i = new Intent(this, PreferencesActivity.class);
+                    i.putExtra("id", plugin.getPreferencesId());
+                    startActivity(i);
+                }, null);
+                return true;
+/*
+            case R.id.nav_survey:
+                startActivity(new Intent(this, SurveyActivity.class));
+                return true;
+*/
+            case R.id.nav_stats:
+                startActivity(new Intent(this, StatsActivity.class));
+                return true;
         }
-        return super.onOptionsItemSelected(item);
-    }
-
-    private void registerBus() {
-        try {
-            MainApp.bus().unregister(this);
-        } catch (RuntimeException x) {
-            // Ignore
-        }
-        MainApp.bus().register(this);
-    }
-
-    private void checkEula() {
-        boolean IUnderstand = PreferenceManager.getDefaultSharedPreferences(getApplicationContext()).getBoolean("I_understand", false);
-        if (!IUnderstand) {
-            Intent intent = new Intent(getApplicationContext(), AgreementActivity.class);
-            startActivity(intent);
-            finish();
-        }
-    }
-
-    //check for sms permission if enable in prefernces
-    @Subscribe
-    public void onStatusEvent(final EventPreferenceChange ev) {
-        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.LOLLIPOP_MR1) {
-            SharedPreferences smssettings = PreferenceManager.getDefaultSharedPreferences(this);
-            synchronized (this){
-                if (smssettings.getBoolean("smscommunicator_remotecommandsallowed", false)) {
-                    setAskForSMS();
-                }
-            }
-        }
-    }
-
-    private synchronized void setAskForSMS() {
-        askForSMS = true;
-    }
-
-    @Override
-    protected void onResume(){
-        super.onResume();
-        askForSMSPermissions();
-    }
-
-    private synchronized void askForSMSPermissions(){
-        if (askForSMS) { //only when settings were changed an MainActivity resumes.
-            askForSMS = false;
-            SharedPreferences smssettings = PreferenceManager.getDefaultSharedPreferences(this);
-            if (smssettings.getBoolean("smscommunicator_remotecommandsallowed", false)) {
-                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.LOLLIPOP_MR1) {
-                    askForPermission(new String[]{Manifest.permission.RECEIVE_SMS,
-                            Manifest.permission.SEND_SMS,
-                            Manifest.permission.RECEIVE_MMS}, CASE_SMS);
-                }
-            }
-        }
-    }
-
-    private void askForPermission(String[] permission, Integer requestCode) {
-        boolean test = false;
-        for (int i=0; i < permission.length; i++) {
-            test = test || (ContextCompat.checkSelfPermission(this, permission[i]) != PackageManager.PERMISSION_GRANTED);
-        }
-        if (test) {
-            ActivityCompat.requestPermissions(this, permission, requestCode);
-        }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (permissions.length != 0) {
-            if (ActivityCompat.checkSelfPermission(this, permissions[0]) == PackageManager.PERMISSION_GRANTED) {
-                switch (requestCode) {
-                    case CASE_STORAGE:
-                        //show dialog after permission is granted
-                        AlertDialog.Builder alert = new AlertDialog.Builder(this);
-                        alert.setMessage(R.string.alert_dialog_storage_permission_text);
-                        alert.setPositiveButton(R.string.ok, null);
-                        alert.show();
-                        break;
-                    case CASE_SMS:
-                        break;
-                }
-            }
-        }
+        return actionBarDrawerToggle.onOptionsItemSelected(item);
     }
 }
